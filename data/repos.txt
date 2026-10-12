@@ -20,7 +20,6 @@
 177cubicube-star/claude-code-mods
 20alexl/windvane
 2bo/pr-inbox
-3DMolier/3D-Models
 3dnow/claude-mods
 416rehman/spinlings
 4DvAnCeBoY/rook-claude-plugin
@@ -1058,7 +1057,6 @@ mikljohansson/claude-code-status-line
 mindthink/zen-breath
 minipai/claudecafe
 Minithena/Claude-Code-Ballet
-minjun0219/rocky
 minsubb13/claude-hud-mod
 Miracle0x0/CCometixLine
 mishgoldenberg/claude-mods
@@ -1338,7 +1336,6 @@ richard-parayno/ccsidebar
 RichardBray/firecrawl-credits-mod
 richardcsuwandi/claude-mods
 richkuo/claude-code-model-effort-shortcuts
-riethmayer/dotfiles
 rightlabs/claude-open-points
 ririversoza/agent-office
 rjohnt/answers-claude-mod
@@ -1448,7 +1445,6 @@ SeanPeppers/claude-files
 seanrobertwright/claude-mods
 segfaultlab/clawd-hud
 seiya8bit/claude-mods
-SeKondBrainAILabs/kemory-plugin
 selmakcby/clawd-madenci
 Sennjen/claude-sdlc
 SeongGwangJu/k-mods
@@ -1522,7 +1518,6 @@ spiiritual/claude-code-stuff
 spinlockdevelopment/lean-and-mean
 sreshtalluri/claude-mods
 ssenge/ClaudeVideoMod
-SSFSKIM/designer
 sshamilton/claude-mods
 ST-byte441/stWorkflow
 StanislavKozachenko/claude-mods
@@ -1690,7 +1685,6 @@ varunmoka7/side-chat
 Vatroslav/cc-mod-ferro
 Vatroslav/cc-mod-suggestion-sentence-case
 Vatroslav/mod-ferro
-Vatsa10/Meta-Harness
 vavald/screen-context
 vayungodara/orbit
 VdustR/vp-cc-mods
