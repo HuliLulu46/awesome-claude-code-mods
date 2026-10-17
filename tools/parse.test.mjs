@@ -60,6 +60,43 @@ test('unknown access retains a lower bound and treats legacy failures conservati
   assert.equal(hasFootprint({ footprint: { status: 'unavailable' }, validate: { status: 'passed' } }), false)
 })
 
+test('truncated validator lists retain whole entries but never establish a complete footprint', () => {
+  const read = (hooks, calls, surfaces = '') => parseValidateOutput(`  ❯ ./register.ts hooks: ${hooks}\n  ❯ ./register.ts calls: ${calls}\n${surfaces && `  ❯ ./register.ts surface modules: ${surfaces}`}\n✔ Validation passed`)
+  const cut = read('session.start, ui.render{component=Pane, r… [+281 chars]', '$.http.fetch (via first, second), $.ui.clos… [+250 chars]')
+  assert.equal(cut.status, 'passed')
+  assert.deepEqual(cut.modules[0].hooks, [{ event: 'session.start', matcher: {} }])
+  assert.deepEqual(cut.modules[0].calls, ['$.http.fetch'])
+  assert.equal(footprintStatus(cut, ['./register.ts']).status, 'unavailable')
+  assert.equal(grade(cut.modules[0].calls, false).level, null)
+  assert.equal(grade(cut.modules[0].calls, false).minimumLevel, 3)
+  for (const r of [
+    read('session.st… [+1 char]', 'nothing on $'),
+    read('session.start', '$.ui.log (via first, seco… [+20 chars]'),
+    read('session.start', '$.http.fetch, $.ui.clos... [+250 chars]'),
+    read('session.start', 'nothing on $', 'hooks/a.tsx, hooks/par… [+10 chars]'),
+  ]) {
+    assert.equal(footprintStatus(r, ['./register.ts']).status, 'unavailable')
+    assert.ok(!JSON.stringify(r.modules[0].hooks).includes('chars'))
+  }
+  assert.deepEqual(read('session.start', '$.ui.log (via first, seco… [+20 chars]').modules[0].calls, [])
+  assert.deepEqual(read('session.start', 'nothing on $', 'hooks/a.tsx, hooks/par… [+10 chars]').modules[0].surfaceModules, ['hooks/a.tsx'])
+  const mixed = parseValidateOutput(SAMPLE + '  ❯ ./b.ts hooks: nothing\n  ❯ ./b.ts calls: $.fs.wri… [+2 chars]')
+  assert.equal(footprintStatus(mixed, ['./register.tsx', './b.ts']).status, 'unavailable')
+})
+
+test('embedded character-count markers discard the affected matcher before parsing it', () => {
+  for (const suffix of ['', ', ui.render{component=Pane, r… [+248 chars]']) {
+    const parsed = parseValidateOutput(`  ❯ ./register.ts hooks: session.start, command.run{command=status}, tool.call{tool=/"^mcp__(?:service|[0-9a-fA-F]{8})__"[+47 chars]/}, session.end${suffix}\n  ❯ ./register.ts calls: $.http.fetch\n✔ Validation passed`)
+    assert.equal(parsed.status, 'passed')
+    assert.deepEqual(parsed.modules[0].hooks, [
+      { event: 'session.start', matcher: {} },
+      { event: 'command.run', matcher: { command: 'status' } },
+    ])
+    assert.deepEqual(footprintStatus(parsed, ['./register.ts']), { status: 'unavailable', reason: 'Validator output was truncated' })
+    assert.deepEqual(parsed.modules[0].calls, ['$.http.fetch'])
+  }
+})
+
 test('failed validation carries the error line', () => {
   const r = parseValidateOutput('✘ Found 1 error:\n\n  ❯ directory: No manifest found\n\n✘ Validation failed\n')
   assert.equal(r.status, 'failed')
@@ -136,6 +173,26 @@ test('a listed duplicate collapses onto its successor; an unlisted same-owner sa
   assert.deepEqual(listed[0], ['galElmalah/claude-queue-plugin:.', 'galElmalah/claude-mods:claude-queue'])
   for (const pair of listed) assert.ok(pair.length === 2 && pair.every(id => /^[\w.-]+\/[\w.-]+:\S+$/.test(id)) && pair[0] !== pair[1], pair.join(' '))
   assert.deepEqual([...readDuplicates('data/no-such-file.txt')], [])
+})
+
+test('a retained duplicate follows an explicit keeper move only when the new keeper is counted', () => {
+  const records = [
+    { id: 'o/repo:.', kind: 'duplicate', duplicateOf: 'o/repo:old' },
+    { id: 'o/repo:old', kind: 'mod' },
+    { id: 'o/repo:new', kind: 'mod' },
+  ]
+  const rules = new Map([['o/repo:.', 'o/repo:new'], ['o/repo:old', 'o/repo:new']])
+  const retained = reconcile(records.map(m => ({ ...m, repo: 'o/repo', validate: { status: 'passed', claudeVersion: '1' } })), [], new Map()).mods
+  const result = applyDuplicates(structuredClone(retained), rules)
+  assert.deepEqual(result.map(m => [m.kind, m.duplicateOf]), [
+    ['duplicate', 'o/repo:new'], ['duplicate', 'o/repo:new'], ['mod', undefined],
+  ])
+  assert.deepEqual(applyDuplicates(structuredClone(result), rules), result)
+  for (const kind of [null, 'fixture', 'catalog', 'duplicate']) {
+    const unavailable = retained.filter(m => m.id !== 'o/repo:new')
+    if (kind) unavailable.push({ id: 'o/repo:new', kind })
+    assert.deepEqual(applyDuplicates(structuredClone(unavailable), rules), unavailable)
+  }
 })
 
 test('only an appended pair between counted mods skips the PR rescan', () => {
