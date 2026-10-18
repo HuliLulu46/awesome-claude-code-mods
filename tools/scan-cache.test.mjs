@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { findingsModules, findingsPackages, findingsKey } from './inspect.mjs'
+import { buildIndex, search, getMod } from '../finder/search.mjs'
+import { reviewSeed } from './seed-publication.mjs'
 
 const scanner = fileURLToPath(new URL('./scan.mjs', import.meta.url))
 
@@ -27,7 +29,7 @@ if (args[0] === 'clone') {
   const plugin = (at, name) => {
     fs.mkdirSync(p.join(at, 'hooks'), { recursive: true }); fs.mkdirSync(p.join(at, '.claude-plugin'), { recursive: true })
     fs.writeFileSync(p.join(at, 'hooks/hooks.json'), JSON.stringify({ modules: ['./register.ts'] }))
-    fs.writeFileSync(p.join(at, 'hooks/register.ts'), 'export function register($) {}')
+    fs.writeFileSync(p.join(at, 'hooks/register.ts'), state.source ?? 'export function register($) {}')
     fs.writeFileSync(p.join(at, '.claude-plugin/plugin.json'), JSON.stringify({ name }))
   }
   if (state.twins) { plugin(p.join(dir, 'plugins/a'), 'twin'); plugin(p.join(dir, 'plugins/b'), 'twin') }
@@ -35,7 +37,12 @@ if (args[0] === 'clone') {
     plugin(dir, 'cache-fixture')
     fs.writeFileSync(p.join(dir, '.claude-plugin/marketplace.json'), JSON.stringify({ name: 'cache-fixture', plugins: [{ name: 'cache-fixture', source: './' }] }))
   }
-} else if (args[0] === '-C') console.log(state.revision)
+} else if (args[0] === '-C') {
+  if (state.inspectionFailure && args[1].endsWith('fixture__mod') && !args.includes('--verify')) {
+    fs.rmSync(args[1], { recursive: true, force: true }); fs.writeFileSync(args[1], 'unreadable checkout')
+  }
+  console.log(state.revision)
+}
 else process.exit(1)
 `)
   command('claude', `
@@ -49,24 +56,26 @@ if (state.twins && !state.fail) {
   if (state.crash === 'twin') process.exit(137)
 }
 if (state.crash === type) process.exit(137)
-if (state.output) console.log('  ❯ ./register.ts hooks: session.start\\n  ❯ ./register.ts calls: ' + state.calls)
+if (state.output) console.log('  ❯ ./register.ts hooks: ' + (state.source ? 'ui.render{component=AssistantMessage}' : 'session.start') + '\\n  ❯ ./register.ts calls: ' + state.calls)
 if (state.fail === type) { console.log('✘ Found 1 error:\\n  ❯ name: invalid\\n\\n✘ Validation failed'); process.exit(1) }
 console.log('✔ Validation passed')
 `)
   let runs = 0
-  function run({ cache = true } = {}) {
+  function run({ cache = true, previous, retire = false, required = false } = {}) {
     writeFileSync(stateFile, JSON.stringify(state))
     writeFileSync(callsFile, '')
     const out = join(root, `out-${runs++}.json`)
-    const result = spawnSync(process.execPath, [scanner, '--out', out, '--include-checked', ...(cache ? ['--cache', join(root, 'cache.json')] : [])], {
+    if (previous) writeFileSync(out, JSON.stringify(previous))
+    const result = spawnSync(process.execPath, [scanner, '--out', out, '--include-checked', ...(cache ? ['--cache', join(root, 'cache.json')] : []), ...(retire ? ['--retire'] : []), ...(required ? ['--required', join(root, 'data/repos.txt')] : [])], {
       cwd: root, encoding: 'utf8', timeout: 30000,
       env: { ...process.env, PATH: join(root, 'bin') + ':' + process.env.PATH, TMPDIR: join(root, 'tmp'), FIXTURE_STATE: stateFile, FIXTURE_CALLS: callsFile },
     })
     assert.ifError(result.error)
+    if (required) return result
     assert.equal(result.status, 0, result.stderr)
     const data = JSON.parse(readFileSync(out, 'utf8'))
     delete data.generated
-    return { data, calls: readFileSync(callsFile, 'utf8').split('\n').filter(Boolean) }
+    return { data, stderr: result.stderr, calls: readFileSync(callsFile, 'utf8').split('\n').filter(Boolean) }
   }
   return { root, state, run }
 }
@@ -79,6 +88,51 @@ test('a cached repository needs no clone and records what a fresh scan records',
   assert.deepEqual(cached.calls, [])
   assert.deepEqual(cached.data, fresh.data)
   assert.deepEqual(f.run({ cache: false }).data, fresh.data)
+})
+
+test('incomplete source analysis is retried, blocks seeds and cannot retire earlier records', t => {
+  const f = fixture(t)
+  const previous = f.run().data
+  const missing = { ...previous.mods[0], id: 'fixture/mod:removed', path: 'removed' }
+  previous.mods.push(missing)
+  f.state.revision = 'b'.repeat(40)
+  f.state.source = 'const value=' + '('.repeat(12000) + '1' + ')'.repeat(12000)
+  const first = f.run({ previous, retire: true })
+  assert.deepEqual(first.data.checkedRepos, [])
+  assert.equal(first.data.mods.find(m => m.path === 'removed').validate.status, 'unknown')
+  assert.ok(first.data.mods[0].compatibility.warnings.some(w => w.code === 'ui-review-incomplete'))
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'cache.json'))).repos, {})
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'data/retirements.json'))).plugins, [])
+  const required = f.run({ required: true })
+  assert.notEqual(required.status, 0)
+  assert.match(required.stderr, /new seed fixture\/mod must clone successfully/)
+  f.state.source = 'const value="safe"'
+  const recovered = f.run()
+  assert.ok(recovered.calls.includes('clone'))
+  assert.deepEqual(recovered.data.checkedRepos, ['fixture/mod'])
+  assert.deepEqual(recovered.data.mods[0].compatibility.warnings, [])
+  assert.deepEqual(f.run().calls, [])
+})
+
+test('a repository inspection failure preserves its records and lets healthy siblings finish', t => {
+  const f = fixture(t)
+  const previous = f.run().data
+  f.state.revision = 'b'.repeat(40)
+  f.state.inspectionFailure = true
+  writeFileSync(join(f.root, 'data/repos.txt'), 'fixture/mod\nfixture/healthy\n')
+  const next = f.run({ previous, retire: true })
+  assert.match(next.stderr, /inspection failed: fixture\/mod/)
+  assert.deepEqual(next.data.checkedRepos, ['fixture/healthy'])
+  const retained = next.data.mods.find(m => m.repo === 'fixture/mod')
+  assert.equal(retained.validate.status, 'unknown')
+  assert.equal(retained.sourceCommit, previous.mods[0].sourceCommit)
+  assert.deepEqual(retained.calls, previous.mods[0].calls)
+  assert.equal(next.data.mods.find(m => m.repo === 'fixture/healthy').validate.status, 'passed')
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(f.root, 'cache.json'))).repos), ['fixture/healthy'])
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'data/retirements.json'))).plugins, [])
+  assert.notEqual(f.run({ required: true }).status, 0)
+  f.state.inspectionFailure = false
+  assert.deepEqual(f.run().data.checkedRepos, ['fixture/healthy', 'fixture/mod'])
 })
 
 test('metadata and classification lists apply to reused findings', t => {
@@ -188,6 +242,34 @@ test('cached findings are keyed on the checkout reader, not on code that only sh
   const modules = findingsModules()
   for (const file of ['tools/inspect.mjs', 'tools/validate.mjs', 'tools/parse.mjs', 'tools/compatibility.mjs']) assert.ok(modules.includes(file), file)
   for (const file of ['tools/scan.mjs', 'tools/grade.mjs', 'tools/kind.mjs', 'tools/dedupe.mjs', 'tools/render.mjs']) assert.ok(!modules.includes(file), file)
+})
+
+test('truncated successful validation stays unknown through scans, cache and publication filters', t => {
+  const f = fixture(t)
+  f.state.calls = '$.fs.read, $.http.fet… [+2 chars]'
+  const first = f.run().data
+  const record = first.mods[0]
+  assert.equal(record.validate.status, 'passed')
+  assert.equal(record.footprint.status, 'unavailable')
+  assert.equal(record.reach.level, null)
+  assert.equal(record.reach.minimumLevel, 1)
+  assert.deepEqual(record.calls, ['$.fs.read'])
+  const index = buildIndex(first)
+  assert.equal(getMod(index, record.id).mod.validation.footprint, 'unavailable')
+  assert.deepEqual(search(index, {}).results.map(result => result.id), [record.id])
+  for (const filter of [{ without: ['network'] }, { max_reach: 1 }, { without: ['every prompt'] }]) {
+    assert.deepEqual(search(index, filter).results, [])
+  }
+  assert.match(reviewSeed(first.mods, first.claudeVersion, new Set()), /footprint unavailable/)
+  const cached = f.run()
+  assert.deepEqual(cached.calls, [])
+  assert.deepEqual(cached.data.mods[0], record)
+  assert.notEqual(f.run({ required: true }).status, 0)
+  f.state.revision = 'b'.repeat(40)
+  f.state.calls = '$.fs.read, $.http.fetch'
+  const recovered = f.run().data.mods[0]
+  assert.equal(recovered.footprint.status, 'reported')
+  assert.equal(recovered.reach.level, 3)
 })
 
 test('a new parser release in the lockfile retires cached findings; other dependency changes do not', () => {
